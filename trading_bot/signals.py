@@ -167,6 +167,26 @@ def current_models(symbols, a):
     return out
 
 
+TRADE_FIELDS = ["symbol", "side", "entry_time", "entry_price", "exit_time", "exit_price",
+                "pnl_pct", "reason"]
+
+
+def log_trade(path: Path, symbol, st, exit_price, when, reason):
+    """Append a closed trade to runs/trades.csv (used by report.py)."""
+    import csv
+    side = st["position"]
+    pnl = (exit_price / st["entry_price"] - 1.0) * side * 100
+    new = not path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=TRADE_FIELDS)
+        if new:
+            w.writeheader()
+        w.writerow({"symbol": symbol, "side": SIDE[side], "entry_time": st["entry_time"],
+                    "entry_price": st["entry_price"], "exit_time": when, "exit_price": exit_price,
+                    "pnl_pct": round(pnl, 4), "reason": reason or "model signal"})
+
+
 def check_once(a, models, clients, paper, state_path):
     states = json.loads(state_path.read_text()) if state_path.exists() else {}
     when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -202,6 +222,8 @@ def check_once(a, models, clients, paper, state_path):
             send_telegram(msg, a.dry_run)
 
         if new_pos != st["position"]:
+            if st["position"] != 0 and not a.dry_run:
+                log_trade(state_path.parent / "trades.csv", symbol, st, price, when, reason)
             if paper and not a.dry_run:
                 paper_trade(paper, symbol, st, new_pos, price, a)
             st.update(position=new_pos, entry_price=price if new_pos else None,
