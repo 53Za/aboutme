@@ -118,7 +118,8 @@ class NewsWatcher:
         self.client = anthropic.Anthropic()
         self.anthropic = anthropic
         self.model = model or os.environ.get("NEWS_MODEL", "claude-opus-5-5")
-        self.coins = [s.split("/")[0].upper() for s in symbols]
+        import data
+        self.coins = [data.hl_coin(s) for s in symbols]
         self.seen_path = runs_dir / "news_seen.json"
         self.state_path = runs_dir / "news_state.json"
         self.log_path = runs_dir / "news_log.csv"

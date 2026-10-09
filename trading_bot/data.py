@@ -103,9 +103,21 @@ def _hl_post(payload: dict):
             time.sleep(2 ** (attempt + 1))
 
 
+_HL_NAMES: dict[str, str] = {}
+
+
 def hl_coin(symbol: str) -> str:
-    """BTC/USDT -> BTC (Hyperliquid perps are quoted in USD)."""
-    return symbol.split("/")[0].upper()
+    """BTC/USDT -> BTC, KPEPE/USDT -> kPEPE (Hyperliquid's exact coin name, quoted in USD)."""
+    base = symbol.split("/")[0]
+    if base.upper() in ("BTC", "ETH", "SOL"):
+        return base.upper()
+    if not _HL_NAMES:
+        try:
+            for u in _hl_post({"type": "meta"})["universe"]:
+                _HL_NAMES[u["name"].upper()] = u["name"]
+        except Exception:
+            return base.upper()
+    return _HL_NAMES.get(base.upper(), base.upper())
 
 
 def fetch_hyperliquid(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
