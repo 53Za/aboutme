@@ -1,5 +1,7 @@
 # Fail-fast evolutionary trading bot
 
+**Run it 24/7 on a server: see [DEPLOY.md](DEPLOY.md).**
+
 A reinforcement-learning trading agent that learns entry and exit signals (short/flat/long). It is judged on held-out validation data during training. When it runs a **losing strategy** or breaches a **drawdown limit**, the current generation is **terminated**: its state is wiped and a new generation is spawned. This repeats until a generation reaches the target Sharpe or `max_generations` runs out.
 
 ```bash

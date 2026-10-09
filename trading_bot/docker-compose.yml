@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    volumes:
+      - ./runs:/app/runs        # models + open positions survive restarts and updates
+    restart: unless-stopped     # restarts after crashes and server reboots
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

@@ -148,6 +148,24 @@ def paper_trade(paper, symbol, st, new_pos, price, a):
         send_telegram(f"⚠️ AI-Trader paper trade failed for {symbol}: {e}", a.dry_run)
 
 
+_model_cache: dict = {}
+
+
+def current_models(symbols, a):
+    """Load models, reloading any whose file changed (so a retrain takes effect without restart)."""
+    out = {}
+    for s in symbols:
+        path = Path(a.model or f"{data.model_dir(s, a.timeframe)}/champion.npz")
+        mtime = path.stat().st_mtime if path.exists() else None
+        cached = _model_cache.get(s)
+        if cached is None or cached[0] != mtime:
+            _model_cache[s] = (mtime, load_model(s, a.timeframe, a.model))
+            if cached is not None:
+                print(f"{s}: reloaded retrained model")
+        out[s] = _model_cache[s][1]
+    return out
+
+
 def check_once(a, models, clients, paper, state_path):
     states = json.loads(state_path.read_text()) if state_path.exists() else {}
     when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -208,29 +226,55 @@ def main():
                    help="USD per paper trade on AI-Trader (used when AI4TRADE_TOKEN is set)")
     p.add_argument("--once", action="store_true", help="check once and exit")
     p.add_argument("--dry-run", action="store_true", help="print messages instead of sending")
+    p.add_argument("--heartbeat-hours", type=float, default=24,
+                   help="send a 'still running' status every N hours (0 = off)")
     a = p.parse_args()
 
     symbols = [s.strip().upper() for s in a.symbols.split(",") if s.strip()]
-    models = {s: load_model(s, a.timeframe, a.model) for s in symbols}
+    current_models(symbols, a)  # fail fast if a model is missing
     paper = ai4trade.from_env()
     print("AI-Trader paper trading:", "ON" if paper else "off (set AI4TRADE_TOKEN to enable)")
     clients, state_path = {}, Path(a.state)
     tf_s = data.timeframe_seconds(a.timeframe)
 
+    send_telegram(f"▶️ Bot started — watching {', '.join(symbols)} ({a.timeframe})\n"
+                  f"Paper trading: {'ON' if paper else 'off'}", a.dry_run)
+    last_beat, failures = time.time(), 0
     while True:
         try:
-            check_once(a, models, clients, paper, state_path)
-        except (OSError, RuntimeError, ValueError) as e:
-            print(f"check failed, will retry next candle: {e}")
-        except Exception as e:  # ccxt network/exchange errors
-            if type(e).__module__.startswith("ccxt"):
-                print(f"exchange error, will retry next candle: {e}")
-            else:
+            check_once(a, current_models(symbols, a), clients, paper, state_path)
+            if failures >= 3:
+                send_telegram("✅ Bot recovered — checks are working again.", a.dry_run)
+            failures = 0
+        except Exception as e:  # network/exchange errors: keep running, retry soon
+            if not isinstance(e, (OSError, RuntimeError, ValueError)) and \
+                    not type(e).__module__.startswith("ccxt"):
                 raise
+            failures += 1
+            print(f"check failed ({failures} in a row): {e}")
+            if failures == 3:
+                send_telegram(f"⚠️ Bot can't get market data (3 failures in a row): {e}\n"
+                              "It keeps retrying every minute.", a.dry_run)
         if a.once:
             break
-        wait = tf_s - (time.time() % tf_s) + 10  # just after the next candle closes
-        time.sleep(wait)
+        if a.heartbeat_hours > 0 and time.time() - last_beat >= a.heartbeat_hours * 3600:
+            send_telegram(status_text(state_path), a.dry_run)
+            last_beat = time.time()
+        if failures:
+            time.sleep(60)
+        else:
+            time.sleep(tf_s - (time.time() % tf_s) + 10)  # just after the next candle closes
+
+
+def status_text(state_path: Path) -> str:
+    states = json.loads(state_path.read_text()) if state_path.exists() else {}
+    lines = ["💓 Bot is running"]
+    for sym, st in states.items():
+        if st.get("position"):
+            lines.append(f"{sym}: {SIDE[st['position']]} since {st['entry_time']} @ {fmt_price(st['entry_price'])}")
+        else:
+            lines.append(f"{sym}: no position")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
