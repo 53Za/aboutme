@@ -153,3 +153,9 @@ def fetch_hyperliquid(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
     idx = np.searchsorted(f_ts, close_time, side="right") - 1  # last funding known at close
     df["funding"] = np.where(idx >= 0, f_val[np.clip(idx, 0, None)], 0.0) if len(f_ts) else 0.0
     return df
+
+
+def hl_mids(coins: list[str]) -> dict[str, float]:
+    """Current mid prices from Hyperliquid, e.g. {"BTC": 82650.5}."""
+    mids = _hl_post({"type": "allMids"})
+    return {c: float(mids[c]) for c in coins if c in mids}

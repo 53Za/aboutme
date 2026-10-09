@@ -30,6 +30,7 @@ import numpy as np
 import ai4trade
 import data
 import envfile
+import news as news_mod
 from agent import Agent
 from env import features
 from risk import RiskGuard, RiskRules
@@ -187,23 +188,25 @@ def log_trade(path: Path, symbol, st, exit_price, when, reason):
                     "pnl_pct": round(pnl, 4), "reason": reason or "model signal"})
 
 
-def check_once(a, models, clients, paper, state_path):
+def check_once(a, models, clients, paper, state_path, news=None):
     states = json.loads(state_path.read_text()) if state_path.exists() else {}
     when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    candle = int(time.time() // data.timeframe_seconds(a.timeframe))
     for symbol, model in models.items():
         st = states.get(symbol, {"position": 0})
+        if st.get("candle") == candle:
+            continue  # already handled this candle
         source = model["exchange"]
         prices, funding = market_data(a, symbol, model, clients)
         if len(prices) < MIN_BARS:
             print(f"{symbol}: only {len(prices)} candles, need {MIN_BARS}; skipping")
             continue
         price = float(prices[-1])
-        candle = int(time.time() // data.timeframe_seconds(a.timeframe))
-        if st.get("candle") == candle:
-            print(f"{symbol}: already checked this candle")
-            continue
         X = features(prices, model["lookback"], funding, model["indicators"])
         desired = model["agent"].act(X[-1], st["position"], greedy=True)
+        if news and news.paused(data.hl_coin(symbol)) and desired not in (0, st["position"]):
+            print(f"{symbol}: news pause blocks a new {SIDE[desired]} entry")
+            desired = 0  # no new entries; a flip becomes a plain close
         reason = None
         if model["risk"]:  # same rules the model was tested with
             guard = RiskGuard(model["risk"], st.get("guard") or
@@ -237,6 +240,78 @@ def check_once(a, models, clients, paper, state_path):
         state_path.write_text(json.dumps(states, indent=2))
 
 
+NEWS_ICON = {"alert": "📰", "pause_entries": "⏸️", "close_positions": "🚨"}
+
+
+def run_news(a, watcher, models, clients, paper, state_path):
+    """One news cycle: new headlines -> Claude -> bounded action. Returns number of new items."""
+    items = watcher.new_items()
+    if not items:
+        return 0
+    states = json.loads(state_path.read_text()) if state_path.exists() else {}
+    coins = {data.hl_coin(s): s for s in models}
+    positions = {c: states.get(s, {}).get("position", 0) for c, s in coins.items()}
+    result = watcher.analyze(items, positions)
+    watcher.mark_seen(items)
+    try:
+        prices = data.hl_mids(list(coins))
+    except Exception as e:  # prices only matter for logging / closing
+        print(f"news: price fetch failed: {e}")
+        prices = {}
+    watcher.log(items, result, prices)
+
+    d = result["decision"]
+    action, named = d["action"], [c for c in d["coins"] if c in coins]
+    rated = sorted((r for r in result["items"] if r["impact"] in ("medium", "high")),
+                   key=lambda r: r["impact"] != "high")
+    print(f"news: {len(items)} new headlines -> {action} {named}")
+    if action == "none":
+        return len(items)
+
+    when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    done = []
+    if action == "pause_entries" and named:
+        hours = max(1.0, min(float(d["pause_hours"]), news_mod.MAX_PAUSE_HOURS))
+        watcher.pause(named, hours)
+        done.append(f"New entries paused for {hours:g}h: {', '.join(named)}")
+    if action == "close_positions":
+        dirs = {}
+        for r in rated:  # strongest direction per coin among the important headlines
+            for c, v in r["direction"].items():
+                if v != "neutral":
+                    dirs.setdefault(c, v)
+        for c in named:
+            sym, st = coins[c], states.get(coins[c], {"position": 0})
+            if not news_mod.against(st.get("position", 0), dirs.get(c, "neutral")):
+                done.append(f"{c}: kept (news doesn't go against the open position)")
+                continue
+            price = prices.get(c) or st["entry_price"]
+            reason = f"news: {d['summary'][:80]}"
+            send_telegram(close_msg(sym, st["position"], st["entry_price"], price, a.timeframe,
+                                    "hyperliquid", when, st["entry_time"], reason), a.dry_run)
+            if not a.dry_run:
+                log_trade(state_path.parent / "trades.csv", sym, st, price, when, reason)
+                if paper:
+                    paper_trade(paper, sym, st, 0, price, a)
+            model = models[sym]
+            if model["risk"]:
+                guard = RiskGuard(model["risk"], st.get("guard") or
+                                  {"pos": st["position"], "entry": st.get("entry_price")})
+                guard.force_close(price)
+                st["guard"] = guard.state()
+            st.update(position=0, entry_price=None, entry_time=None)
+            states[sym] = st
+            done.append(f"{c}: position closed")
+        state_path.write_text(json.dumps(states, indent=2))
+
+    head = "\n".join(f"• [{r['impact'].upper()}] {items[r['id']]['title']} ({items[r['id']]['source']})"
+                     for r in rated[:5] if 0 <= r["id"] < len(items))
+    send_telegram(f"{NEWS_ICON.get(action, '📰')} NEWS — {action.replace('_', ' ')}\n{d['summary']}\n"
+                  + (f"\n{head}\n" if head else "")
+                  + ("\n" + "\n".join(done) if done else ""), a.dry_run)
+    return len(items)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--symbols", default="BTC/USDT,ETH/USDT,SOL/USDT", help="comma-separated, e.g. BTC/USDT,ETH/USDT")
@@ -251,6 +326,8 @@ def main():
     p.add_argument("--dry-run", action="store_true", help="print messages instead of sending")
     p.add_argument("--heartbeat-hours", type=float, default=24,
                    help="send a 'still running' status every N hours (0 = off)")
+    p.add_argument("--news-minutes", type=float, default=None,
+                   help="minutes between news checks (default: NEWS_INTERVAL_MIN or 10; 0 = off)")
     a = p.parse_args()
     envfile.load()
 
@@ -261,12 +338,21 @@ def main():
     clients, state_path = {}, Path(a.state)
     tf_s = data.timeframe_seconds(a.timeframe)
 
+    news_every = a.news_minutes if a.news_minutes is not None else \
+        float(os.environ.get("NEWS_INTERVAL_MIN", "10"))
+    watcher = None
+    if news_every > 0 and os.environ.get("ANTHROPIC_API_KEY") and os.environ.get("NEWS", "on") != "off":
+        watcher = news_mod.NewsWatcher(symbols, state_path.parent)
+    print("News watcher:", f"ON ({watcher.model}, every {news_every:g} min)" if watcher
+          else "off (set ANTHROPIC_API_KEY to enable)")
+
     send_telegram(f"▶️ Bot started — watching {', '.join(symbols)} ({a.timeframe})\n"
-                  f"Paper trading: {'ON' if paper else 'off'}", a.dry_run)
-    last_beat, failures = time.time(), 0
+                  f"Paper trading: {'ON' if paper else 'off'} · "
+                  f"News AI: {'ON' if watcher else 'off'}", a.dry_run)
+    last_beat, failures, news_failures, next_news = time.time(), 0, 0, 0.0
     while True:
         try:
-            check_once(a, current_models(symbols, a), clients, paper, state_path)
+            check_once(a, current_models(symbols, a), clients, paper, state_path, watcher)
             if failures >= 3:
                 send_telegram("✅ Bot recovered — checks are working again.", a.dry_run)
             failures = 0
@@ -279,6 +365,19 @@ def main():
             if failures == 3:
                 send_telegram(f"⚠️ Bot can't get market data (3 failures in a row): {e}\n"
                               "It keeps retrying every minute.", a.dry_run)
+
+        if watcher and time.time() >= next_news:
+            try:
+                run_news(a, watcher, current_models(symbols, a), clients, paper, state_path)
+                news_failures = 0
+            except Exception as e:  # news must never stop price signals
+                news_failures += 1
+                print(f"news check failed ({news_failures} in a row): {type(e).__name__}: {e}")
+                if news_failures == 3:
+                    send_telegram(f"⚠️ News AI failing (3 in a row): {type(e).__name__}. "
+                                  "Price signals keep running.", a.dry_run)
+            next_news = time.time() + news_every * 60
+
         if a.once:
             break
         if a.heartbeat_hours > 0 and time.time() - last_beat >= a.heartbeat_hours * 3600:
@@ -287,7 +386,9 @@ def main():
         if failures:
             time.sleep(60)
         else:
-            time.sleep(tf_s - (time.time() % tf_s) + 10)  # just after the next candle closes
+            to_candle = tf_s - (time.time() % tf_s) + 10  # just after the next candle closes
+            to_news = (next_news - time.time()) if watcher else to_candle
+            time.sleep(max(5.0, min(to_candle, to_news)))
 
 
 def status_text(state_path: Path) -> str:

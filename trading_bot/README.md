@@ -23,6 +23,8 @@ Each coin and timeframe gets its own model in `runs/<SYMBOL>_<TIMEFRAME>/`. The 
 | `main.py` | CLI; writes `runs/generations.csv`, `champion.npz`, `result.json` |
 | `signals.py` | Telegram alerts: OPEN / CLOSE, LONG / SHORT, per coin; optional paper trades |
 | `risk.py` | stop-loss, profit lock, min hold, re-entry cooldown, enforced in tests and live |
+| `news.py` | News AI: headlines → Claude → alert / pause entries / close opposing positions |
+| `report.py` | live trade stats + News AI scorecard |
 | `ai4trade.py` | paper trading on [AI-Trader](https://github.com/HKUDS/AI-Trader) (ai4trade.ai) |
 
 ## Telegram trade alerts
@@ -69,6 +71,20 @@ Disable them with `--use-risk false`. OPEN alerts show the stop-loss price; CLOS
 | OKX (~11 weeks of test data) | −14.8% (0/5) | −6.4% (0/5) | +29.7% |
 
 The rules helped on both datasets, but the bot still lost money on OKX during a strong uptrend. The indicator features (`--indicators`) did not improve results, and neither did funding (`--funding`), so both are off by default.
+
+## News AI (`news.py`)
+Every `NEWS_INTERVAL_MIN` minutes (default 10), the bot reads fresh headlines from CoinDesk, Cointelegraph, Decrypt and Google News (crypto + macro: Fed, war, sanctions, tariffs, inflation). It asks Claude to rate them and choose **one bounded action**:
+
+| Action | What happens |
+|---|---|
+| none | nothing (most news) |
+| alert | 📰 Telegram message with the summary |
+| pause entries | ⏸️ no new positions in the named coins for up to 24h; open ones keep their stops |
+| close positions | 🚨 closes positions the news goes **against** (long + bearish, short + bullish) |
+
+News never opens trades. Every judged headline is logged to `runs/news_log.csv` with prices, and `python report.py` scores Claude's bullish/bearish calls 4h and 24h later. Let news do more only if that scorecard proves itself over 50+ calls.
+
+Enable it by setting `ANTHROPIC_API_KEY` in `.env`. Model: `NEWS_MODEL` (default `claude-opus-5-5`; `claude-haiku-5-5` costs far less). Requests use low effort and the API's automatic refusal fallback. If the news check fails, price signals keep running.
 
 ## Paper trading on AI-Trader
 Each alert can also be placed as a simulated trade on [ai4trade.ai](https://ai4trade.ai) (from [HKUDS/AI-Trader](https://github.com/HKUDS/AI-Trader)): `buy`/`sell` for longs and `short`/`cover` for shorts, at the platform's live price, with $100K of paper money. The result is an independent record of how the signals perform. **Trades there are public** and other agents can copy them.

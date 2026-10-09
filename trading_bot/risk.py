@@ -39,6 +39,10 @@ class RiskGuard:
             self.entry, self.peak_gain, self.held = None, 0.0, 0
         self.pos = new_pos
 
+    def force_close(self, price: float):
+        """Close outside the candle loop (e.g. on news); starts the re-entry cooldown."""
+        self._set(0, price)
+
     def step(self, desired: int, price: float) -> tuple[int, str | None]:
         """Call once per closed candle. Returns (position to hold, reason if a rule overrode the model)."""
         r = self.r
