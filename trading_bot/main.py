@@ -1,7 +1,7 @@
 """Train the evolutionary trading bot on crypto candles.
 
-    python main.py --symbol BTC/USDT --timeframe 1h          # OKX history (default)
-    python main.py --exchange kraken --symbol ETH/USDT
+    python main.py --symbol BTC/USDT --timeframe 1h          # Hyperliquid candles (default)
+    python main.py --exchange okx --symbol ETH/USDT          # any ccxt exchange (price only)
     python main.py --inherit elite --kill-drawdown 0.35      # keep the best survivor
     python main.py --csv prices.csv | --synthetic            # offline data
 """
@@ -17,39 +17,50 @@ from env import features, step_returns, run, metrics
 from evolve import Config, evolve, evaluate
 
 
-def prep(prices, lookback):
-    X = features(prices, lookback)
-    return X[:-1], step_returns(prices)
+def load_market(a, seed):
+    """Returns (prices, funding or None)."""
+    if a.csv:
+        return data.load_csv(a.csv), None
+    if a.synthetic:
+        return data.synthetic(seed=seed), None
+    if a.exchange == "hyperliquid":
+        print(f"downloading {a.timeframe} candles + funding for {a.symbol} from Hyperliquid...")
+        df = data.fetch_hyperliquid(a.symbol, a.timeframe, a.bars)
+        return df["close"].to_numpy(), (df["funding"].to_numpy() if a.funding else None)
+    print(f"downloading {a.bars} closed {a.timeframe} candles of {a.symbol} from {a.exchange}...")
+    return data.fetch_closed_candles(data.make_exchange(a.exchange), a.symbol, a.timeframe, a.bars), None
+
+
+def prep(prices, funding, lookback):
+    """Causal features on the full series, then chronological train/val/test slices."""
+    X, rets = features(prices, lookback, funding)[:-1], step_returns(prices)
+    a, b = int(len(rets) * 0.6), int(len(rets) * 0.8)
+    return (X[:a], rets[:a]), (X[a:b], rets[a:b]), (X[b:], rets[b:])
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--exchange", default="okx")
+    p.add_argument("--exchange", default="hyperliquid", help="hyperliquid, or any ccxt exchange id")
+    p.add_argument("--funding", action="store_true",
+                   help="add perp funding-rate features (Hyperliquid only; no measured gain so far)")
     p.add_argument("--symbol", default="BTC/USDT")
     p.add_argument("--timeframe", default="1h")
-    p.add_argument("--bars", type=int, default=8000, help="candles of history to train on")
+    p.add_argument("--bars", type=int, default=8000, help="candles of history (Hyperliquid max 5000)")
     p.add_argument("--csv", help="use a CSV with a `close` column instead of the exchange")
     p.add_argument("--synthetic", action="store_true", help="offline test data")
     p.add_argument("--lookback", type=int, default=5)
     p.add_argument("--out", help="default: runs/<SYMBOL>_<TIMEFRAME>")
     for name, field in Config.__dataclass_fields__.items():
-        p.add_argument(f"--{name.replace('_', '-')}", type=type(field.default), default=field.default)
+        kind = type(field.default)
+        parse = (lambda v: v.lower() in ("1", "true", "yes", "on")) if kind is bool else kind
+        p.add_argument(f"--{name.replace('_', '-')}", type=parse, default=field.default)
     a = p.parse_args()
     a.periods_per_year = data.periods_per_year(a.timeframe)
     cfg = Config(**{k: getattr(a, k) for k in Config.__dataclass_fields__})
 
-    if a.csv:
-        prices = data.load_csv(a.csv)
-    elif a.synthetic:
-        prices = data.synthetic(seed=cfg.seed)
-    else:
-        print(f"downloading {a.bars} closed {a.timeframe} candles of {a.symbol} from {a.exchange}...")
-        prices = data.fetch_closed_candles(data.make_exchange(a.exchange), a.symbol, a.timeframe, a.bars)
-    print(f"{len(prices)} candles")
-    train, val, test = data.split(prices)
-    Xtr, rtr = prep(train, a.lookback)
-    Xva, rva = prep(val, a.lookback)
-    Xte, rte = prep(test, a.lookback)
+    prices, funding = load_market(a, cfg.seed)
+    print(f"{len(prices)} candles" + (" with funding rates" if funding is not None else ""))
+    (Xtr, rtr), (Xva, rva), (Xte, rte) = prep(prices, funding, a.lookback)
 
     champion, champ_m, history, cfg_dict = evolve(Xtr, rtr, Xva, rva, cfg)
 
@@ -74,7 +85,8 @@ def main():
               "trust the TEST row, not the validation row.")
 
     np.savez(out / "champion.npz", W=champion.W, lookback=a.lookback,
-             exchange=a.exchange, symbol=a.symbol, timeframe=a.timeframe)
+             exchange=a.exchange, symbol=a.symbol, timeframe=a.timeframe,
+             use_funding=funding is not None)
     (out / "result.json").write_text(json.dumps(
         {"config": cfg_dict, "validation": champ_m, "test": test_m, "buy_and_hold_test": bh_m}, indent=2))
     print(f"saved to {out}/")

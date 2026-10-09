@@ -4,7 +4,15 @@ import numpy as np
 ACTIONS = np.array([-1, 0, 1])  # short, flat, long
 
 
-def features(prices: np.ndarray, lookback: int) -> np.ndarray:
+def funding_features(funding: np.ndarray) -> np.ndarray:
+    """Perp funding rate: positive = longs pay shorts (crowded long), negative = crowded short."""
+    bps = funding * 1e4
+    avg24 = np.array([bps[max(0, t - 23):t + 1].mean() for t in range(len(bps))])
+    scale = 0.5  # fixed (no look-ahead): typical hourly funding is ~0.1 bps, extremes several bps
+    return np.column_stack([bps / scale, avg24 / scale, (bps - avg24) / scale])
+
+
+def features(prices: np.ndarray, lookback: int, funding: np.ndarray | None = None) -> np.ndarray:
     """Per-step features built only from information available at time t."""
     logp = np.log(prices)
     r = np.diff(logp, prepend=logp[0])
@@ -16,6 +24,8 @@ def features(prices: np.ndarray, lookback: int) -> np.ndarray:
         feats.append(mom)                                     # momentum
     vol = np.array([r[max(0, t - 30):t + 1].std() + 1e-8 for t in range(len(r))])
     X = np.column_stack(feats) / vol[:, None]                 # volatility-normalised
+    if funding is not None:
+        X = np.column_stack([X, funding_features(np.asarray(funding, dtype=float))])
     X[:90] = 0.0                                              # warm-up rows have no history
     return np.clip(X, -5, 5)
 
