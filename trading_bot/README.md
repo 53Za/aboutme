@@ -17,6 +17,20 @@ python main.py --help                           # every knob in evolve.Config
 | `agent.py` | linear softmax policy trained with policy gradient |
 | `evolve.py` | generation loop: train → judge → terminate & wipe → respawn |
 | `main.py` | CLI; writes `runs/generations.csv`, `champion.npz`, `result.json` |
+| `signals.py` | sends LONG / SHORT / FLAT alerts from the champion to Telegram |
+
+## Telegram signals
+1. In Telegram, message **@BotFather**, send `/newbot`, and copy the token it gives you.
+2. Send any message to your new bot, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy the `chat` → `id` value.
+3. Train a model, then run the notifier:
+```bash
+export TELEGRAM_BOT_TOKEN=...  TELEGRAM_CHAT_ID=...
+python main.py --inherit elite --kill-drawdown 0.35          # writes runs/champion.npz
+python signals.py --csv prices.csv --dry-run                  # test: print instead of send
+pip install ccxt                                              # for live exchange candles
+python signals.py --exchange binance --symbol BTC/USDT --timeframe 1h --every 3600
+```
+A message is sent only when the signal changes, so you get one alert per entry or exit. Train on candles with the same timeframe that you run live.
 
 ## Kill rules (`evolve.Config`)
 - `kill_drawdown`: terminate if the validation max drawdown is above this

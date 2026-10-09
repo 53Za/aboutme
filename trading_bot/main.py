@@ -59,7 +59,7 @@ def main():
         print(f"note: champion was picked from {len(history)} generations on validation data; "
               "trust the TEST row, not the validation row.")
 
-    np.savez(out / "champion.npz", W=champion.W)
+    np.savez(out / "champion.npz", W=champion.W, lookback=a.lookback)
     (out / "result.json").write_text(json.dumps(
         {"config": cfg_dict, "validation": champ_m, "test": test_m, "buy_and_hold_test": bh_m}, indent=2))
     print(f"saved to {out}/")

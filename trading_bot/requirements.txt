@@ -1,2 +1,3 @@
 numpy>=1.26
 pandas>=2.0
+# optional, for live exchange data in signals.py: ccxt>=4.0
