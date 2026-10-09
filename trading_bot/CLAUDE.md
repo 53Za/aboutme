@@ -23,7 +23,7 @@ docker compose up -d --build             # restarts the bot; positions in runs/ 
 docker compose logs -f --tail 20         # confirm "Bot started"; Ctrl+C to stop watching
 ```
 Retrained models are picked up on the next candle without a restart:
-`docker compose exec bot python main.py --symbol BTC/USDT --timeframe 1h --inherit elite --kill-drawdown 0.35 --kill-on-loss false --target-sharpe 99 --max-generations 20`
+`docker compose exec bot python main.py --symbol BTC/USDT --timeframe 1h --ensemble 5 --inherit elite --kill-drawdown 0.35 --kill-on-loss false --target-sharpe 99 --max-generations 20`
 
 ## Code map
 `main.py` train · `evolve.py` generations + kill rules · `agent.py` policy · `env.py` features/backtest · `risk.py` stop-loss etc. · `signals.py` live loop + Telegram · `report.py` live stats + news scorecard · `news.py` News AI · `ai4trade.py` paper trading

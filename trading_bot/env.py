@@ -59,19 +59,47 @@ def step_returns(prices: np.ndarray) -> np.ndarray:
     return prices[1:] / prices[:-1] - 1.0
 
 
-def run(policy_fn, X, rets, cost: float, guard=None):
+VOL_SHORT, VOL_LONG, MIN_SIZE = 24, 720, 0.25
+
+
+def vol_size(rets_before: np.ndarray) -> float:
+    """Position size in [0.25, 1]: smaller when the last day was wilder than the last month.
+
+    Uses only returns that already happened (causal). 1.0 = normal size.
+    """
+    if len(rets_before) < VOL_SHORT * 2:
+        return 1.0
+    short = rets_before[-VOL_SHORT:].std()
+    normal = np.median([rets_before[max(0, i - VOL_SHORT):i].std()
+                        for i in range(max(VOL_SHORT, len(rets_before) - VOL_LONG),
+                                       len(rets_before) + 1, VOL_SHORT)])
+    if short <= 0 or not np.isfinite(normal):
+        return 1.0
+    return float(np.clip(normal / short, MIN_SIZE, 1.0))
+
+
+def run(policy_fn, X, rets, cost: float, guard=None, sizing=False, history=None):
     """Roll a policy over a window. Returns per-step net PnL, equity curve and positions.
 
     `guard` (risk.RiskGuard) can override the policy, exactly as it does in live alerts.
+    `sizing` scales each new trade by vol_size(); `history` = returns before the window,
+    so the volatility estimate is warm from the first step.
     """
-    pos, pnl, positions = 0, np.empty(len(rets)), np.empty(len(rets), dtype=int)
+    pos, size = 0, 1.0
+    pnl, positions = np.empty(len(rets)), np.empty(len(rets), dtype=int)
     px = np.concatenate([[1.0], np.cumprod(1.0 + rets)])  # relative price at each decision
+    past = np.concatenate([history if history is not None else [], rets])
+    off = len(past) - len(rets)
     for t in range(len(rets)):
         new_pos = policy_fn(X[t], pos)
         if guard is not None:
             new_pos, _ = guard.step(new_pos, px[t])
-        pnl[t] = new_pos * rets[t] - cost * abs(new_pos - pos)
-        pos = positions[t] = new_pos
+        new_size = size
+        if new_pos != pos:
+            new_size = vol_size(past[:off + t]) if (sizing and new_pos != 0) else 1.0
+        pnl[t] = new_pos * new_size * rets[t] - cost * abs(new_pos * new_size - pos * size)
+        pos, size = new_pos, new_size
+        positions[t] = pos
     equity = np.cumprod(1.0 + pnl)
     return pnl, equity, positions
 

@@ -34,7 +34,7 @@ It restarts on its own after crashes and server reboots (`restart: unless-stoppe
 | Watch logs | `docker compose logs -f` |
 | Stop / start | `docker compose stop` / `docker compose start` |
 | Update the code | `git pull && docker compose up -d --build` |
-| Retrain a coin (takes effect on the next candle, no restart needed) | `docker compose exec bot python main.py --symbol BTC/USDT --timeframe 1h --inherit elite --kill-drawdown 0.35 --kill-on-loss false --target-sharpe 99 --max-generations 20` |
+| Retrain a coin (takes effect on the next candle, no restart needed) | `docker compose exec bot python main.py --symbol BTC/USDT --timeframe 1h --ensemble 5 --inherit elite --kill-drawdown 0.35 --kill-on-loss false --target-sharpe 99 --max-generations 20` |
 | Add a coin | add it to `SYMBOLS` in `.env`, then `docker compose up -d` |
 | Change timeframe | change `TIMEFRAME` in `.env`, then `docker compose up -d` (it trains new models) |
 | Paper trading on ai4trade.ai | set `AI4TRADE_TOKEN` in `.env`, then `docker compose up -d` |

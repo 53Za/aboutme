@@ -38,9 +38,11 @@ def risk_rules(cfg: "Config") -> RiskRules | None:
     return RiskRules(cfg.stop_loss, cfg.protect_after, cfg.giveback, cfg.min_hold_bars, cfg.cooldown_bars)
 
 
-def evaluate(agent, X, rets, cost, ppy=8760, rules: RiskRules | None = None):
+def evaluate(agent, X, rets, cost, ppy=8760, rules: RiskRules | None = None,
+             sizing: bool = False, history=None):
     guard = RiskGuard(rules) if rules else None
-    return metrics(*run(lambda f, p: agent.act(f, p, greedy=True), X, rets, cost, guard), ppy)
+    return metrics(*run(lambda f, p: agent.act(f, p, greedy=True), X, rets, cost, guard,
+                        sizing, history), ppy)
 
 
 def death_cause(m, cfg):

@@ -3,7 +3,7 @@
 set -euo pipefail
 SYMBOLS="${SYMBOLS:-BTC/USDT,ETH/USDT,SOL/USDT}"
 TIMEFRAME="${TIMEFRAME:-1h}"
-TRAIN_ARGS="${TRAIN_ARGS:---inherit elite --kill-drawdown 0.35 --kill-on-loss false --target-sharpe 99 --max-generations 20}"
+TRAIN_ARGS="${TRAIN_ARGS:---ensemble 5 --inherit elite --kill-drawdown 0.35 --kill-on-loss false --target-sharpe 99 --max-generations 20}"
 
 IFS=',' read -ra LIST <<< "$SYMBOLS"
 for sym in "${LIST[@]}"; do

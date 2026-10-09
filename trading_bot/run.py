@@ -10,7 +10,7 @@ from pathlib import Path
 import envfile
 
 HERE = Path(__file__).parent
-DEFAULT_TRAIN = ("--inherit elite --kill-drawdown 0.35 --kill-on-loss false "
+DEFAULT_TRAIN = ("--ensemble 5 --inherit elite --kill-drawdown 0.35 --kill-on-loss false "
                  "--target-sharpe 99 --max-generations 20")
 
 

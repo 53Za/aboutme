@@ -18,7 +18,8 @@ def summary(path: Path, fee_pct: float) -> str:
     t = pd.read_csv(path)
     if t.empty:
         return "No closed trades yet."
-    t["net"] = t["pnl_pct"] - 2 * fee_pct
+    size = t["size"].fillna(1.0) if "size" in t else 1.0
+    t["net"] = (t["pnl_pct"] - 2 * fee_pct) * size  # % of your normal trade amount
     lines = [f"📊 Live signal report — {len(t)} closed trades "
              f"({t['exit_time'].min()[:10]} → {t['exit_time'].max()[:10]})",
              f"Win rate: {(t['net'] > 0).mean():.0%} · Sum of trade %: {t['net'].sum():+.2f}% "

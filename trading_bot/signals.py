@@ -31,8 +31,8 @@ import ai4trade
 import data
 import envfile
 import news as news_mod
-from agent import Agent
-from env import features
+from agent import Agent, Ensemble
+from env import features, vol_size
 from risk import RiskGuard, RiskRules
 
 MIN_BARS = 120  # features need ~90 bars of history
@@ -63,12 +63,13 @@ def fmt_price(p: float) -> str:
     return f"{p:,.2f}" if p >= 1 else f"{p:.6f}"
 
 
-def open_msg(symbol, side, price, tf, exchange, when, rules=None):
+def open_msg(symbol, side, price, tf, exchange, when, rules=None, size=1.0):
     icon, verb = ("🟢", "BUY") if side == 1 else ("🔴", "SELL")
-    risk = ""
+    risk = "" if size >= 0.995 else \
+        f"Size: {size:.0%} of your normal amount (market is wilder than usual)\n"
     if rules:
         stop = price * (1 - side * rules.stop_loss)
-        risk = (f"Stop-loss: {fmt_price(stop)} ({-rules.stop_loss:.0%})\n"
+        risk += (f"Stop-loss: {fmt_price(stop)} ({-rules.stop_loss:.0%})\n"
                 f"Profit lock: after +{rules.protect_after:.0%}, closes if {rules.giveback:.0%} of the gain is given back\n")
     return (f"{icon} OPEN {SIDE[side]} — {symbol}\n"
             f"Action: {verb} to open a {SIDE[side].lower()} position\n"
@@ -90,7 +91,8 @@ def close_msg(symbol, side, entry, price, tf, exchange, when, opened, reason=Non
             f"Timeframe: {tf} · {exchange}\n{when}")
 
 
-def transition_messages(symbol, state, new_pos, price, tf, exchange, when, reason=None, rules=None):
+def transition_messages(symbol, state, new_pos, price, tf, exchange, when, reason=None, rules=None,
+                        size=1.0):
     """Messages for moving from state['position'] to new_pos. A flip = close + open."""
     old, msgs = state["position"], []
     if new_pos == old:
@@ -99,7 +101,7 @@ def transition_messages(symbol, state, new_pos, price, tf, exchange, when, reaso
         msgs.append(close_msg(symbol, old, state["entry_price"], price, tf, exchange, when,
                               state["entry_time"], reason))
     if new_pos != 0:
-        msgs.append(open_msg(symbol, new_pos, price, tf, exchange, when, rules))
+        msgs.append(open_msg(symbol, new_pos, price, tf, exchange, when, rules, size))
     return msgs
 
 
@@ -112,8 +114,11 @@ def load_model(symbol, timeframe, model_path=None):
     trained_tf = str(saved["timeframe"]) if "timeframe" in saved else timeframe
     if trained_tf != timeframe:
         raise SystemExit(f"{path} was trained on {trained_tf} candles, not {timeframe}.")
+    agents = [Agent(0, np.random.default_rng(0), weights=W)
+              for W in (saved["Ws"] if "Ws" in saved else [saved["W"]])]
     return {
-        "agent": Agent(0, np.random.default_rng(0), weights=saved["W"]),
+        "agent": agents[0] if len(agents) == 1 else Ensemble(agents),
+        "sizing": bool(saved["sizing"]) if "sizing" in saved else False,
         "lookback": int(saved["lookback"]) if "lookback" in saved else 5,
         "exchange": str(saved["exchange"]) if "exchange" in saved else "hyperliquid",
         "use_funding": bool(saved["use_funding"]) if "use_funding" in saved else False,
@@ -135,7 +140,7 @@ def market_data(a, symbol, model, clients):
     return data.fetch_closed_candles(ex, symbol, a.timeframe, bars), None
 
 
-def paper_trade(paper, symbol, st, new_pos, price, a):
+def paper_trade(paper, symbol, st, new_pos, price, a, size=1.0):
     """Mirror the transition on the AI-Trader paper account. Failures are reported, not fatal."""
     coin = data.hl_coin(symbol)
     try:
@@ -143,7 +148,7 @@ def paper_trade(paper, symbol, st, new_pos, price, a):
             paper.close(st["position"], coin, st["paper_qty"], "trading_bot signal: close")
         st["paper_qty"] = None
         if new_pos != 0:
-            qty = a.paper_usd / price
+            qty = a.paper_usd * size / price
             paper.open(new_pos, coin, qty, f"trading_bot signal: open {SIDE[new_pos].lower()}")
             st["paper_qty"] = qty
     except (ai4trade.Ai4TradeError, OSError) as e:
@@ -169,7 +174,7 @@ def current_models(symbols, a):
 
 
 TRADE_FIELDS = ["symbol", "side", "entry_time", "entry_price", "exit_time", "exit_price",
-                "pnl_pct", "reason"]
+                "pnl_pct", "reason", "size"]
 
 
 def log_trade(path: Path, symbol, st, exit_price, when, reason):
@@ -179,13 +184,15 @@ def log_trade(path: Path, symbol, st, exit_price, when, reason):
     pnl = (exit_price / st["entry_price"] - 1.0) * side * 100
     new = not path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
+    fields = TRADE_FIELDS if new else path.open().readline().strip().split(",")
     with path.open("a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=TRADE_FIELDS)
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         if new:
             w.writeheader()
         w.writerow({"symbol": symbol, "side": SIDE[side], "entry_time": st["entry_time"],
                     "entry_price": st["entry_price"], "exit_time": when, "exit_price": exit_price,
-                    "pnl_pct": round(pnl, 4), "reason": reason or "model signal"})
+                    "pnl_pct": round(pnl, 4), "reason": reason or "model signal",
+                    "size": round(st.get("size", 1.0), 3)})
 
 
 def check_once(a, models, clients, paper, state_path, news=None):
@@ -220,17 +227,22 @@ def check_once(a, models, clients, paper, state_path, news=None):
             send_telegram(f"🤖 Watching {symbol} ({a.timeframe} · {source})\n"
                           f"No position right now — wait for an OPEN alert.\nPrice: {fmt_price(price)}",
                           a.dry_run)
+        size = st.get("size", 1.0)
+        if new_pos != st["position"]:
+            size = 1.0
+            if new_pos != 0 and model["sizing"]:
+                size = vol_size(np.diff(prices) / prices[:-1])
         for msg in transition_messages(symbol, st, new_pos, price, a.timeframe, source, when, reason,
-                                       model["risk"]):
+                                       model["risk"], size):
             send_telegram(msg, a.dry_run)
 
         if new_pos != st["position"]:
             if st["position"] != 0 and not a.dry_run:
                 log_trade(state_path.parent / "trades.csv", symbol, st, price, when, reason)
             if paper and not a.dry_run:
-                paper_trade(paper, symbol, st, new_pos, price, a)
+                paper_trade(paper, symbol, st, new_pos, price, a, size)
             st.update(position=new_pos, entry_price=price if new_pos else None,
-                      entry_time=when if new_pos else None)
+                      entry_time=when if new_pos else None, size=size if new_pos else 1.0)
         st["started"] = st.get("started", when)
         st["candle"] = candle
         states[symbol] = st
@@ -316,7 +328,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--symbols", default="BTC/USDT,ETH/USDT,SOL/USDT", help="comma-separated, e.g. BTC/USDT,ETH/USDT")
     p.add_argument("--timeframe", default="1h")
-    p.add_argument("--bars", type=int, default=300)
+    p.add_argument("--bars", type=int, default=800, help="candles fetched per check (sizing uses ~30 days)")
     p.add_argument("--model", help="override model path (single symbol only)")
     p.add_argument("--csv", help="read prices from a CSV instead of the exchange (testing)")
     p.add_argument("--state", default="runs/signal_state.json")

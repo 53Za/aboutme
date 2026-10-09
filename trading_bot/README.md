@@ -51,6 +51,19 @@ python signals.py --symbols BTC/USDT --once --dry-run                 # test: pr
 ```
 Open positions are tracked in `runs/signal_state.json`, so a restart doesn't repeat alerts.
 
+## Ensemble and position sizing
+`--ensemble 5` trains 5 models with different seeds that **vote** (they average their action probabilities). It's the default in `start.sh`/`run.py`. `--sizing true` shrinks each new trade (down to 25%) when the last 24h were wilder than the last 30 days. Sizing is off by default.
+
+Measured on Hyperliquid 1h data: 25 single models vs 5 ensembles of 5, unseen test period, risk rules on.
+
+| Coin | Single model: avg (worst … best) | Ensemble of 5: avg (worst … best) | + sizing (ensemble) | Buy & hold |
+|---|---|---|---|---|
+| BTC | +10.6% (+5.3 … +14.1) | **+12.0% (+11.3 … +12.4)** | +9.3%, drawdown 6.3% → 4.2% | +6.3% |
+| ETH | +27.7% (+10.6 … +36.9) | **+32.2% (+30.6 … +33.7)** | +23.0% | +2.6% |
+| SOL | +1.1% (−10.4 … +19.2) | +0.5% (−0.8 … +1.7) | −5.6% | +5.2% |
+
+The ensemble removed most of the luck between runs and raised the average on BTC and ETH. Sizing cut drawdown a little but lowered returns and Sharpe on every coin, so it's off by default.
+
 ## Risk rules (`risk.py`)
 Adapted from [NoFxAiOS/nofx](https://github.com/NoFxAiOS/nofx): "the model proposes, the runtime disposes". The model suggests a position, and these rules decide what is actually held. The rules are identical in backtests and in live alerts.
 
