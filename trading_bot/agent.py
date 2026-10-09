@@ -48,3 +48,14 @@ class Agent:
         adv = (rewards - self.baseline) / scale
         self.baseline = 0.9 * self.baseline + 0.1 * rewards.mean()
         self.W += self.lr * sum(a * g for a, g in zip(adv, grads)) / length
+
+
+class Ensemble:
+    """Several independently trained agents voting: averages their action probabilities."""
+
+    def __init__(self, agents: list[Agent]):
+        self.agents = agents
+
+    def act(self, feat, pos, greedy=True):
+        p = np.mean([a._probs(a._x(feat, pos)) for a in self.agents], axis=0)
+        return int(ACTIONS[int(p.argmax())])

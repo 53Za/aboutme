@@ -1,0 +1,17 @@
+# Alternative to Docker: systemd service.
+# sudo cp trading-bot.service /etc/systemd/system/ && sudo systemctl enable --now trading-bot
+[Unit]
+Description=Crypto trading signal bot (Telegram alerts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=trader
+WorkingDirectory=/home/trader/aboutme/trading_bot
+EnvironmentFile=/home/trader/aboutme/trading_bot/.env
+ExecStart=/home/trader/aboutme/trading_bot/.venv/bin/python signals.py --symbols ${SYMBOLS} --timeframe ${TIMEFRAME}
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
