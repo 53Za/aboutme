@@ -31,6 +31,7 @@ import ai4trade
 import data
 from agent import Agent
 from env import features
+from risk import RiskGuard, RiskRules
 
 MIN_BARS = 120  # features need ~90 bars of history
 SIDE = {1: "LONG", -1: "SHORT"}
@@ -60,16 +61,21 @@ def fmt_price(p: float) -> str:
     return f"{p:,.2f}" if p >= 1 else f"{p:.6f}"
 
 
-def open_msg(symbol, side, price, tf, exchange, when):
+def open_msg(symbol, side, price, tf, exchange, when, rules=None):
     icon, verb = ("🟢", "BUY") if side == 1 else ("🔴", "SELL")
+    risk = ""
+    if rules:
+        stop = price * (1 - side * rules.stop_loss)
+        risk = (f"Stop-loss: {fmt_price(stop)} ({-rules.stop_loss:.0%})\n"
+                f"Profit lock: after +{rules.protect_after:.0%}, closes if {rules.giveback:.0%} of the gain is given back\n")
     return (f"{icon} OPEN {SIDE[side]} — {symbol}\n"
             f"Action: {verb} to open a {SIDE[side].lower()} position\n"
-            f"Entry price: {fmt_price(price)}\n"
+            f"Entry price: {fmt_price(price)}\n{risk}"
             f"Timeframe: {tf} · {exchange}\n{when}\n"
             "Model signal, not financial advice.")
 
 
-def close_msg(symbol, side, entry, price, tf, exchange, when, opened):
+def close_msg(symbol, side, entry, price, tf, exchange, when, opened, reason=None):
     pnl = (price / entry - 1.0) * side
     verb = "SELL" if side == 1 else "BUY"
     icon = "✅" if pnl >= 0 else "❌"
@@ -77,20 +83,21 @@ def close_msg(symbol, side, entry, price, tf, exchange, when, opened):
             f"Action: {verb} to close your {SIDE[side].lower()} position\n"
             f"Entry: {fmt_price(entry)} → Exit: {fmt_price(price)}\n"
             f"Result: {pnl:+.2%} (before fees)\n"
+            f"Reason: {reason or 'model signal'}\n"
             f"Opened: {opened}\n"
             f"Timeframe: {tf} · {exchange}\n{when}")
 
 
-def transition_messages(symbol, state, new_pos, price, tf, exchange, when):
+def transition_messages(symbol, state, new_pos, price, tf, exchange, when, reason=None, rules=None):
     """Messages for moving from state['position'] to new_pos. A flip = close + open."""
     old, msgs = state["position"], []
     if new_pos == old:
         return msgs
     if old != 0:
         msgs.append(close_msg(symbol, old, state["entry_price"], price, tf, exchange, when,
-                              state["entry_time"]))
+                              state["entry_time"], reason))
     if new_pos != 0:
-        msgs.append(open_msg(symbol, new_pos, price, tf, exchange, when))
+        msgs.append(open_msg(symbol, new_pos, price, tf, exchange, when, rules))
     return msgs
 
 
@@ -108,6 +115,9 @@ def load_model(symbol, timeframe, model_path=None):
         "lookback": int(saved["lookback"]) if "lookback" in saved else 5,
         "exchange": str(saved["exchange"]) if "exchange" in saved else "hyperliquid",
         "use_funding": bool(saved["use_funding"]) if "use_funding" in saved else False,
+        "indicators": bool(saved["indicators"]) if "indicators" in saved else False,
+        "risk": RiskRules(**json.loads(str(saved["risk"])))
+                if "risk" in saved and json.loads(str(saved["risk"])) else None,
     }
 
 
@@ -149,14 +159,27 @@ def check_once(a, models, clients, paper, state_path):
             print(f"{symbol}: only {len(prices)} candles, need {MIN_BARS}; skipping")
             continue
         price = float(prices[-1])
-        X = features(prices, model["lookback"], funding)
-        new_pos = model["agent"].act(X[-1], st["position"], greedy=True)
+        candle = int(time.time() // data.timeframe_seconds(a.timeframe))
+        if st.get("candle") == candle:
+            print(f"{symbol}: already checked this candle")
+            continue
+        X = features(prices, model["lookback"], funding, model["indicators"])
+        desired = model["agent"].act(X[-1], st["position"], greedy=True)
+        reason = None
+        if model["risk"]:  # same rules the model was tested with
+            guard = RiskGuard(model["risk"], st.get("guard") or
+                              {"pos": st["position"], "entry": st.get("entry_price")})
+            new_pos, reason = guard.step(desired, price)
+            st["guard"] = guard.state()
+        else:
+            new_pos = desired
 
         if "started" not in st and new_pos == 0:
             send_telegram(f"🤖 Watching {symbol} ({a.timeframe} · {source})\n"
                           f"No position right now — wait for an OPEN alert.\nPrice: {fmt_price(price)}",
                           a.dry_run)
-        for msg in transition_messages(symbol, st, new_pos, price, a.timeframe, source, when):
+        for msg in transition_messages(symbol, st, new_pos, price, a.timeframe, source, when, reason,
+                                       model["risk"]):
             send_telegram(msg, a.dry_run)
 
         if new_pos != st["position"]:
@@ -165,6 +188,7 @@ def check_once(a, models, clients, paper, state_path):
             st.update(position=new_pos, entry_price=price if new_pos else None,
                       entry_time=when if new_pos else None)
         st["started"] = st.get("started", when)
+        st["candle"] = candle
         states[symbol] = st
         side = SIDE.get(new_pos, "no position")
         print(f"{when} {symbol} {fmt_price(price)} -> {side}")

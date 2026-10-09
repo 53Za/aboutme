@@ -5,6 +5,7 @@ import numpy as np
 
 from agent import Agent
 from env import run, metrics
+from risk import RiskGuard, RiskRules
 
 
 @dataclass
@@ -20,13 +21,26 @@ class Config:
     cost: float = 0.0005             # per unit of position change (fees + slippage)
     lr: float = 0.01
     periods_per_year: int = 8760     # 1h crypto candles; set from --timeframe
+    use_risk: bool = True            # apply risk.RiskRules when judging (same as live)
+    stop_loss: float = 0.03
+    protect_after: float = 0.05
+    giveback: float = 0.40
+    min_hold_bars: int = 2
+    cooldown_bars: int = 4
     inherit: str = "scratch"         # "scratch" = full wipe; "elite" = mutate best survivor
     mutation: float = 0.02
     seed: int = 0
 
 
-def evaluate(agent, X, rets, cost, ppy=8760):
-    return metrics(*run(lambda f, p: agent.act(f, p, greedy=True), X, rets, cost), ppy)
+def risk_rules(cfg: "Config") -> RiskRules | None:
+    if not cfg.use_risk:
+        return None
+    return RiskRules(cfg.stop_loss, cfg.protect_after, cfg.giveback, cfg.min_hold_bars, cfg.cooldown_bars)
+
+
+def evaluate(agent, X, rets, cost, ppy=8760, rules: RiskRules | None = None):
+    guard = RiskGuard(rules) if rules else None
+    return metrics(*run(lambda f, p: agent.act(f, p, greedy=True), X, rets, cost, guard), ppy)
 
 
 def death_cause(m, cfg):
@@ -55,11 +69,11 @@ def evolve(X_train, r_train, X_val, r_val, cfg: Config, log=print):
             start = int(rng.integers(90, max_start))
             agent.train_episode(X_train, r_train, cfg.cost, start, cfg.episode_len)
             if ep >= cfg.grace_episodes and ep % cfg.check_every == 0:
-                m = evaluate(agent, X_val, r_val, cfg.cost, cfg.periods_per_year)
+                m = evaluate(agent, X_val, r_val, cfg.cost, cfg.periods_per_year, risk_rules(cfg))
                 cause = death_cause(m, cfg)
                 if cause:
                     break
-        m = m or evaluate(agent, X_val, r_val, cfg.cost, cfg.periods_per_year)
+        m = m or evaluate(agent, X_val, r_val, cfg.cost, cfg.periods_per_year, risk_rules(cfg))
 
         status = f"TERMINATED at ep {ep}: {cause}" if cause else "SURVIVED"
         log(f"gen {gen:3d} | val ret {m['return']:+7.1%} dd {m['max_drawdown']:6.1%} "

@@ -14,7 +14,7 @@ import pandas as pd
 
 import data
 from env import features, step_returns, run, metrics
-from evolve import Config, evolve, evaluate
+from evolve import Config, evolve, evaluate, risk_rules
 
 
 def load_market(a, seed):
@@ -31,9 +31,9 @@ def load_market(a, seed):
     return data.fetch_closed_candles(data.make_exchange(a.exchange), a.symbol, a.timeframe, a.bars), None
 
 
-def prep(prices, funding, lookback):
+def prep(prices, funding, lookback, indicators=False):
     """Causal features on the full series, then chronological train/val/test slices."""
-    X, rets = features(prices, lookback, funding)[:-1], step_returns(prices)
+    X, rets = features(prices, lookback, funding, indicators)[:-1], step_returns(prices)
     a, b = int(len(rets) * 0.6), int(len(rets) * 0.8)
     return (X[:a], rets[:a]), (X[a:b], rets[a:b]), (X[b:], rets[b:])
 
@@ -49,6 +49,7 @@ def main():
     p.add_argument("--csv", help="use a CSV with a `close` column instead of the exchange")
     p.add_argument("--synthetic", action="store_true", help="offline test data")
     p.add_argument("--lookback", type=int, default=5)
+    p.add_argument("--indicators", action="store_true", help="add RSI / MACD / Bollinger / Donchian features")
     p.add_argument("--out", help="default: runs/<SYMBOL>_<TIMEFRAME>")
     for name, field in Config.__dataclass_fields__.items():
         kind = type(field.default)
@@ -60,7 +61,7 @@ def main():
 
     prices, funding = load_market(a, cfg.seed)
     print(f"{len(prices)} candles" + (" with funding rates" if funding is not None else ""))
-    (Xtr, rtr), (Xva, rva), (Xte, rte) = prep(prices, funding, a.lookback)
+    (Xtr, rtr), (Xva, rva), (Xte, rte) = prep(prices, funding, a.lookback, a.indicators)
 
     champion, champ_m, history, cfg_dict = evolve(Xtr, rtr, Xva, rva, cfg)
 
@@ -75,7 +76,7 @@ def main():
         return
 
     # Out-of-sample check on data no generation trained on or was selected against.
-    test_m = evaluate(champion, Xte, rte, cfg.cost, cfg.periods_per_year)
+    test_m = evaluate(champion, Xte, rte, cfg.cost, cfg.periods_per_year, risk_rules(cfg))
     bh_m = metrics(*run(lambda f, pos: 1, Xte, rte, 0.0), cfg.periods_per_year)
     print(f"champion  validation: {json.dumps({k: round(v, 4) for k, v in champ_m.items()})}")
     print(f"champion  TEST      : {json.dumps({k: round(v, 4) for k, v in test_m.items()})}")
@@ -86,7 +87,8 @@ def main():
 
     np.savez(out / "champion.npz", W=champion.W, lookback=a.lookback,
              exchange=a.exchange, symbol=a.symbol, timeframe=a.timeframe,
-             use_funding=funding is not None)
+             use_funding=funding is not None, indicators=a.indicators,
+             risk=json.dumps(risk_rules(cfg).__dict__ if cfg.use_risk else None))
     (out / "result.json").write_text(json.dumps(
         {"config": cfg_dict, "validation": champ_m, "test": test_m, "buy_and_hold_test": bh_m}, indent=2))
     print(f"saved to {out}/")

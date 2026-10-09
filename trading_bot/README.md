@@ -5,7 +5,7 @@ A reinforcement-learning trading agent that learns entry and exit signals (short
 ```bash
 pip install -r requirements.txt
 python main.py --symbol BTC/USDT --timeframe 1h --inherit elite --kill-drawdown 0.35   # Hyperliquid (default)
-python main.py --funding                                                                # + perp funding-rate features
+python main.py --funding --indicators                                                   # optional extra features
 python main.py --exchange okx --symbol ETH/USDT                                         # any ccxt exchange, more history
 python main.py --synthetic                                                              # offline test data
 python main.py --help                                                                   # every knob
@@ -20,6 +20,7 @@ Each coin and timeframe gets its own model in `runs/<SYMBOL>_<TIMEFRAME>/`. The 
 | `evolve.py` | generation loop: train → judge → terminate & wipe → respawn |
 | `main.py` | CLI; writes `runs/generations.csv`, `champion.npz`, `result.json` |
 | `signals.py` | Telegram alerts: OPEN / CLOSE, LONG / SHORT, per coin; optional paper trades |
+| `risk.py` | stop-loss, profit lock, min hold, re-entry cooldown, enforced in tests and live |
 | `ai4trade.py` | paper trading on [AI-Trader](https://github.com/HKUDS/AI-Trader) (ai4trade.ai) |
 
 ## Telegram trade alerts
@@ -45,6 +46,27 @@ python signals.py --symbols BTC/USDT,ETH/USDT --timeframe 1h          # runs unt
 python signals.py --symbols BTC/USDT --once --dry-run                 # test: print, don't send
 ```
 Open positions are tracked in `runs/signal_state.json`, so a restart doesn't repeat alerts.
+
+## Risk rules (`risk.py`)
+Adapted from [NoFxAiOS/nofx](https://github.com/NoFxAiOS/nofx): "the model proposes, the runtime disposes". The model suggests a position, and these rules decide what is actually held. The rules are identical in backtests and in live alerts.
+
+| Rule | Default | Flag |
+|---|---|---|
+| Stop-loss | close at −3% | `--stop-loss 0.03` |
+| Profit lock | after +5% peak, close if 40% of the gain is given back | `--protect-after 0.05 --giveback 0.4` |
+| Minimum hold | 2 candles before the model may exit or flip | `--min-hold-bars 2` |
+| Re-entry cooldown | 4 candles flat after any close | `--cooldown-bars 4` |
+
+Disable them with `--use-risk false`. OPEN alerts show the stop-loss price; CLOSE alerts give the reason.
+
+**Measured effect** (BTC/USDT 1h, 5 seeds each, unseen test period, after costs):
+
+| Data | Without rules | With rules | Buy & hold |
+|---|---|---|---|
+| Hyperliquid (~6 weeks of test data) | +3.6% (4/5 seeds profitable) | **+10.9% (5/5)** | +6.3% |
+| OKX (~11 weeks of test data) | −14.8% (0/5) | −6.4% (0/5) | +29.7% |
+
+The rules helped on both datasets, but the bot still lost money on OKX during a strong uptrend. The indicator features (`--indicators`) did not improve results, and neither did funding (`--funding`), so both are off by default.
 
 ## Paper trading on AI-Trader
 Each alert can also be placed as a simulated trade on [ai4trade.ai](https://ai4trade.ai) (from [HKUDS/AI-Trader](https://github.com/HKUDS/AI-Trader)): `buy`/`sell` for longs and `short`/`cover` for shorts, at the platform's live price, with $100K of paper money. The result is an independent record of how the signals perform. **Trades there are public** and other agents can copy them.

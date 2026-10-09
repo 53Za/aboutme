@@ -12,7 +12,29 @@ def funding_features(funding: np.ndarray) -> np.ndarray:
     return np.column_stack([bps / scale, avg24 / scale, (bps - avg24) / scale])
 
 
-def features(prices: np.ndarray, lookback: int, funding: np.ndarray | None = None) -> np.ndarray:
+def indicator_features(prices: np.ndarray) -> np.ndarray:
+    """Classic indicators (as in NoFxAiOS/nofx market/data_indicators.go), scaled to roughly [-1, 1]."""
+    import pandas as pd
+    p = pd.Series(prices)
+    d = p.diff()
+    gain = d.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    loss = (-d.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    rsi = 100 - 100 / (1 + gain / (loss + 1e-12))
+    macd = p.ewm(span=12, adjust=False).mean() - p.ewm(span=26, adjust=False).mean()
+    hist = macd - macd.ewm(span=9, adjust=False).mean()
+    vol = p.pct_change().rolling(30, min_periods=2).std() * p + 1e-12
+    mid, sd = p.rolling(20, min_periods=2).mean(), p.rolling(20, min_periods=2).std() + 1e-12
+    hi, lo = p.rolling(20, min_periods=1).max(), p.rolling(20, min_periods=1).min()
+    return np.column_stack([
+        (rsi - 50) / 25,                       # RSI(14)
+        hist / vol,                            # MACD histogram in volatility units
+        (p - mid) / (2 * sd),                  # Bollinger %b, centred
+        2 * (p - lo) / (hi - lo + 1e-12) - 1,  # Donchian(20) position
+    ]).astype(float)
+
+
+def features(prices: np.ndarray, lookback: int, funding: np.ndarray | None = None,
+             indicators: bool = False) -> np.ndarray:
     """Per-step features built only from information available at time t."""
     logp = np.log(prices)
     r = np.diff(logp, prepend=logp[0])
@@ -26,6 +48,8 @@ def features(prices: np.ndarray, lookback: int, funding: np.ndarray | None = Non
     X = np.column_stack(feats) / vol[:, None]                 # volatility-normalised
     if funding is not None:
         X = np.column_stack([X, funding_features(np.asarray(funding, dtype=float))])
+    if indicators:
+        X = np.column_stack([X, indicator_features(prices)])
     X[:90] = 0.0                                              # warm-up rows have no history
     return np.clip(X, -5, 5)
 
@@ -35,11 +59,17 @@ def step_returns(prices: np.ndarray) -> np.ndarray:
     return prices[1:] / prices[:-1] - 1.0
 
 
-def run(policy_fn, X, rets, cost: float):
-    """Roll a policy over a window. Returns per-step net PnL, equity curve and positions."""
+def run(policy_fn, X, rets, cost: float, guard=None):
+    """Roll a policy over a window. Returns per-step net PnL, equity curve and positions.
+
+    `guard` (risk.RiskGuard) can override the policy, exactly as it does in live alerts.
+    """
     pos, pnl, positions = 0, np.empty(len(rets)), np.empty(len(rets), dtype=int)
+    px = np.concatenate([[1.0], np.cumprod(1.0 + rets)])  # relative price at each decision
     for t in range(len(rets)):
         new_pos = policy_fn(X[t], pos)
+        if guard is not None:
+            new_pos, _ = guard.step(new_pos, px[t])
         pnl[t] = new_pos * rets[t] - cost * abs(new_pos - pos)
         pos = positions[t] = new_pos
     equity = np.cumprod(1.0 + pnl)
