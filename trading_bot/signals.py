@@ -29,6 +29,7 @@ import numpy as np
 
 import ai4trade
 import data
+import envfile
 from agent import Agent
 from env import features
 from risk import RiskGuard, RiskRules
@@ -229,6 +230,7 @@ def main():
     p.add_argument("--heartbeat-hours", type=float, default=24,
                    help="send a 'still running' status every N hours (0 = off)")
     a = p.parse_args()
+    envfile.load()
 
     symbols = [s.strip().upper() for s in a.symbols.split(",") if s.strip()]
     current_models(symbols, a)  # fail fast if a model is missing
