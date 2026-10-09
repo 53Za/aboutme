@@ -106,6 +106,8 @@ Every 5 minutes it looks at the 50 most recently traded pump.fun coins and keeps
 - has socials, isn't a copycat name, and the creator hasn't launched more than 2 of them
 - at least $10k of volume and 50 buys in the last hour, with more buys than sells (from DexScreener)
 
+If pump.fun blocks the server (Cloudflare, 403), it switches automatically to GeckoTerminal (`PUMP_SOURCE=auto`). That source also requires 30+ **unique buyers** in the last hour, which filters out fake volume from a few wallets, but it has no socials or creator data.
+
 Each pick goes to `runs/pump_picks.csv`, and its price is checked again 1h and 24h later. A coin with no market left counts as −100%. **It never buys.** Per-pick Telegram alerts stay off (`PUMP_ALERTS=off`); only a daily scorecard is sent.
 ```bash
 docker compose --profile pumpscan up -d        # start the scanner next to the bot

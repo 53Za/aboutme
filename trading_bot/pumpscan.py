@@ -25,8 +25,10 @@ import envfile
 
 PUMP_API = "https://frontend-api-v3.pump.fun/coins"
 DEX_API = "https://api.dexscreener.com/tokens/v1/solana/"
+GT_API = "https://api.geckoterminal.com/api/v2/networks/solana/dexes/pump-fun/pools"
 FIELDS = ["picked_at", "mint", "symbol", "name", "age_min", "mcap_usd", "price_usd", "vol_h1",
-          "buys_h1", "sells_h1", "dex", "url", "price_1h", "ret_1h", "price_24h", "ret_24h"]
+          "buys_h1", "sells_h1", "dex", "url", "price_1h", "ret_1h", "price_24h", "ret_24h",
+          "source", "buyers_h1"]
 
 # Filters: "early traction, not obviously dead or fake". Tuned by reasoning, not by results.
 RULES = {
@@ -38,20 +40,30 @@ RULES = {
     "min_buy_sell_ratio": 1.0,                    # more buying than selling
     "max_picks_per_scan": 3,
     "max_creator_coins": 2,                       # skip serial launchers
+    "min_buyers_h1": 30,                          # unique buyers (GeckoTerminal only): no wash trading
 }
 ROUND_TRIP_FEE = 0.03  # ~3% for DEX fees + slippage on thin meme pools, buy + sell
+
+
+class Blocked(RuntimeError):
+    """The source refused us (Cloudflare page, 403, or persistent 429)."""
 
 
 def _get(url: str, tries: int = 4):
     for i in range(tries):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (trading-bot pumpscan)"})
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (trading-bot pumpscan)",
+                                                       "Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=20) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
-            if e.code != 429 or i == tries - 1:
+            if e.code in (401, 403) or (e.code == 429 and i == tries - 1):
+                raise Blocked(f"HTTP {e.code} from {url.split('/')[2]}") from None
+            if e.code != 429:
                 raise
             time.sleep(10 * (i + 1))  # rate limited: back off
+        except json.JSONDecodeError:
+            raise Blocked(f"non-JSON reply (bot protection?) from {url.split('/')[2]}") from None
         except OSError:
             if i == tries - 1:
                 raise
@@ -77,6 +89,43 @@ def dex_info(mints: list[str]) -> dict[str, dict]:
     return out
 
 
+def pumpfun_candidates() -> list[dict]:
+    """Recently traded coins from pump.fun's own API (has ATH, socials, creator)."""
+    now_ms = time.time() * 1000
+    out = []
+    for c in _get(f"{PUMP_API}?offset=0&limit=50&sort=last_trade_timestamp&order=DESC"
+                  "&includeNsfw=false") or []:
+        if c.get("nsfw") or c.get("is_banned"):
+            continue
+        mcap = c.get("usd_market_cap") or 0
+        out.append({"mint": c["mint"], "symbol": c.get("symbol", ""), "name": c.get("name", ""),
+                    "age_min": (now_ms - c.get("created_timestamp", now_ms)) / 60_000, "mcap": mcap,
+                    "ath": c.get("ath_market_cap") or mcap, "creator": c.get("creator", ""),
+                    "socials": bool(c.get("twitter") or c.get("telegram") or c.get("website")),
+                    "buyers_h1": None, "source": "pump.fun"})
+    return out
+
+
+def geckoterminal_candidates(pages: int = 3) -> list[dict]:
+    """Backup source: busiest pump.fun bonding-curve pools on GeckoTerminal (has unique buyers;
+    no ATH, socials or creator, so those filters are skipped)."""
+    out, now = [], datetime.now(timezone.utc)
+    for page in range(1, pages + 1):
+        for p in (_get(f"{GT_API}?sort=h24_volume_usd_desc&page={page}") or {}).get("data", []):
+            a = p["attributes"]
+            created = datetime.fromisoformat(a["pool_created_at"].replace("Z", "+00:00"))
+            h1 = a.get("transactions", {}).get("h1", {})
+            sym = a.get("name", "").split(" / ")[0]
+            out.append({"mint": p["relationships"]["base_token"]["data"]["id"].split("_", 1)[1],
+                        "symbol": sym, "name": sym,
+                        "age_min": (now - created).total_seconds() / 60,
+                        "mcap": float(a.get("market_cap_usd") or a.get("fdv_usd") or 0),
+                        "ath": None, "creator": "", "socials": None,
+                        "buyers_h1": int(h1.get("buyers") or 0), "source": "geckoterminal"})
+        time.sleep(2.5)  # GeckoTerminal allows ~30 requests/minute
+    return out
+
+
 class Scanner:
     def __init__(self, runs: Path):
         self.picks_path = runs / "pump_picks.csv"
@@ -85,6 +134,8 @@ class Scanner:
         st = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
         self.creators: dict[str, int] = st.get("creators", {})
         self.last_summary = st.get("last_summary", 0)
+        self.source = os.environ.get("PUMP_SOURCE", "auto")  # auto | pumpfun | geckoterminal
+        self.blocked_note = ""
 
     def save_state(self):
         self.state_path.write_text(json.dumps({"creators": self.creators,
@@ -99,36 +150,44 @@ class Scanner:
     def write_rows(self, rows: list[dict]):
         tmp = self.picks_path.with_suffix(".tmp")
         with tmp.open("w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=FIELDS)
+            w = csv.DictWriter(f, fieldnames=FIELDS, restval="")
             w.writeheader()
             w.writerows(rows)
         tmp.replace(self.picks_path)
 
     # ---- picking -----------------------------------------------------------------------
+    def candidates(self) -> list[dict]:
+        if self.source == "geckoterminal":
+            return geckoterminal_candidates()
+        try:
+            return pumpfun_candidates()
+        except Blocked as e:
+            if self.source == "pumpfun":
+                raise
+            if not self.blocked_note:
+                print(f"pump.fun refused ({e}); using GeckoTerminal instead")
+            self.blocked_note = str(e)
+            return geckoterminal_candidates()
+
     def scan(self) -> list[dict]:
-        coins = _get(f"{PUMP_API}?offset=0&limit=50&sort=last_trade_timestamp&order=DESC"
-                     "&includeNsfw=false") or []
-        now_ms = time.time() * 1000
         rows = self.rows()
         have = {r["mint"] for r in rows}
         names = {r["name"].strip().lower() for r in rows} | {r["symbol"].strip().lower() for r in rows}
         r = RULES
 
         pre = []
-        for c in coins:
-            age = (now_ms - c.get("created_timestamp", now_ms)) / 60_000
-            mcap = c.get("usd_market_cap") or 0
-            ath = c.get("ath_market_cap") or mcap
-            if (c.get("mint") in have or c.get("nsfw") or c.get("is_banned")
-                    or not (r["min_age_min"] <= age <= r["max_age_min"])
-                    or not (r["min_mcap"] <= mcap <= r["max_mcap"])
-                    or (ath and mcap < r["min_of_ath"] * ath)
-                    or not (c.get("twitter") or c.get("telegram") or c.get("website"))
-                    or c.get("name", "").strip().lower() in names        # copycat of an earlier pick
-                    or c.get("symbol", "").strip().lower() in names
-                    or self.creators.get(c.get("creator", ""), 0) >= r["max_creator_coins"]):
+        for c in self.candidates():
+            if (c["mint"] in have
+                    or not (r["min_age_min"] <= c["age_min"] <= r["max_age_min"])
+                    or not (r["min_mcap"] <= c["mcap"] <= r["max_mcap"])
+                    or (c["ath"] and c["mcap"] < r["min_of_ath"] * c["ath"])
+                    or c["socials"] is False                              # None = unknown (backup source)
+                    or (c["buyers_h1"] is not None and c["buyers_h1"] < r["min_buyers_h1"])
+                    or c["name"].strip().lower() in names                 # copycat of an earlier pick
+                    or c["symbol"].strip().lower() in names
+                    or (c["creator"] and self.creators.get(c["creator"], 0) >= r["max_creator_coins"])):
                 continue
-            pre.append((c, age, mcap))
+            pre.append((c, c["age_min"], c["mcap"]))
         if not pre:
             return []
 
@@ -149,9 +208,10 @@ class Scanner:
                         "name": c.get("name", "")[:60], "age_min": round(age), "mcap_usd": round(mcap),
                         "price_usd": d["price"], "vol_h1": round(d["vol_h1"]), "buys_h1": d["buys_h1"],
                         "sells_h1": d["sells_h1"], "dex": d["dex"],
-                        "url": d["url"] or f"https://pump.fun/coin/{c['mint']}"})
-            creator = c.get("creator", "")
-            self.creators[creator] = self.creators.get(creator, 0) + 1
+                        "url": d["url"] or f"https://pump.fun/coin/{c['mint']}",
+                        "source": c["source"], "buyers_h1": c["buyers_h1"] if c["buyers_h1"] is not None else ""})
+            if c["creator"]:
+                self.creators[c["creator"]] = self.creators.get(c["creator"], 0) + 1
         if new:
             self.write_rows(rows + new)
             self.save_state()
@@ -222,11 +282,12 @@ def main():
         return
     every = float(os.environ.get("PUMP_INTERVAL_MIN", "5")) * 60
     alerts = os.environ.get("PUMP_ALERTS", "off").lower() == "on"
-    print(f"pump scanner: test mode, every {every / 60:g} min, per-pick alerts {'ON' if alerts else 'off'}")
+    print(f"pump scanner: test mode, every {every / 60:g} min, source {sc.source}, "
+          f"per-pick alerts {'ON' if alerts else 'off'}")
     while True:
         try:
             for r in sc.scan():
-                print(f"pick: {r['symbol']} age {r['age_min']}m mcap ${int(r['mcap_usd']):,} "
+                print(f"pick [{r['source']}]: {r['symbol']} age {r['age_min']}m mcap ${int(r['mcap_usd']):,} "
                       f"vol1h ${int(r['vol_h1']):,} buys/sells {r['buys_h1']}/{r['sells_h1']}")
                 if alerts:
                     send_telegram(f"🎰 HIGH-RISK meme coin (scanner pick, not advice)\n"
@@ -234,8 +295,8 @@ def main():
                                   f"Market cap ${int(r['mcap_usd']):,} · 1h volume ${int(r['vol_h1']):,}\n"
                                   f"{r['url']}", a.dry_run)
             n = sc.check_outcomes()
-            if n:
-                print(f"scored {n} outcomes")
+            print(f"{datetime.now(timezone.utc):%H:%M} scan done ({len(sc.rows())} picks so far"
+                  + (f", scored {n}" if n else "") + ")")
             if time.time() - sc.last_summary >= 24 * 3600 and sc.rows():
                 send_telegram(scorecard(sc.rows()), a.dry_run)
                 sc.last_summary = time.time()
