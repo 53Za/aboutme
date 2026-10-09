@@ -19,13 +19,14 @@ class Config:
     target_sharpe: float = 1.0       # a surviving generation at/above this ends evolution
     cost: float = 0.0005             # per unit of position change (fees + slippage)
     lr: float = 0.01
+    periods_per_year: int = 8760     # 1h crypto candles; set from --timeframe
     inherit: str = "scratch"         # "scratch" = full wipe; "elite" = mutate best survivor
     mutation: float = 0.02
     seed: int = 0
 
 
-def evaluate(agent, X, rets, cost):
-    return metrics(*run(lambda f, p: agent.act(f, p, greedy=True), X, rets, cost))
+def evaluate(agent, X, rets, cost, ppy=8760):
+    return metrics(*run(lambda f, p: agent.act(f, p, greedy=True), X, rets, cost), ppy)
 
 
 def death_cause(m, cfg):
@@ -54,11 +55,11 @@ def evolve(X_train, r_train, X_val, r_val, cfg: Config, log=print):
             start = int(rng.integers(90, max_start))
             agent.train_episode(X_train, r_train, cfg.cost, start, cfg.episode_len)
             if ep >= cfg.grace_episodes and ep % cfg.check_every == 0:
-                m = evaluate(agent, X_val, r_val, cfg.cost)
+                m = evaluate(agent, X_val, r_val, cfg.cost, cfg.periods_per_year)
                 cause = death_cause(m, cfg)
                 if cause:
                     break
-        m = m or evaluate(agent, X_val, r_val, cfg.cost)
+        m = m or evaluate(agent, X_val, r_val, cfg.cost, cfg.periods_per_year)
 
         status = f"TERMINATED at ep {ep}: {cause}" if cause else "SURVIVED"
         log(f"gen {gen:3d} | val ret {m['return']:+7.1%} dd {m['max_drawdown']:6.1%} "
