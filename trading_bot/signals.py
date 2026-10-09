@@ -216,7 +216,7 @@ def check_once(a, models, clients, paper, state_path):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--symbols", default="BTC/USDT", help="comma-separated, e.g. BTC/USDT,ETH/USDT")
+    p.add_argument("--symbols", default="BTC/USDT,ETH/USDT,SOL/USDT", help="comma-separated, e.g. BTC/USDT,ETH/USDT")
     p.add_argument("--timeframe", default="1h")
     p.add_argument("--bars", type=int, default=300)
     p.add_argument("--model", help="override model path (single symbol only)")

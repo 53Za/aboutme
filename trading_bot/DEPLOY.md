@@ -2,6 +2,8 @@
 
 The bot needs very little: 1 CPU, 1 GB RAM, about 1 GB of disk. A ~$5/month Linux VPS (Ubuntu 22.04 or newer) from any provider is enough. Hyperliquid doesn't block regions, so any server location works.
 
+You don't need a Windows/RDP server. A Linux VPS with SSH is cheaper and enough. From Windows, open **PowerShell** and type `ssh root@YOUR_SERVER_IP` (SSH is built in), or use PuTTY.
+
 ## 1. Install Docker (once)
 ```bash
 ssh root@YOUR_SERVER_IP
@@ -13,7 +15,7 @@ curl -fsSL https://get.docker.com | sh
 git clone -b add-trading-bot https://github.com/53za/aboutme
 cd aboutme/trading_bot
 cp .env.example .env
-nano .env        # paste TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID; set SYMBOLS, e.g. BTC/USDT,ETH/USDT
+nano .env        # paste TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID; SYMBOLS defaults to BTC, ETH and SOL
 chmod 600 .env
 ```
 

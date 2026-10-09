@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Container entrypoint: train any missing models, then run the alert loop forever.
 set -euo pipefail
-SYMBOLS="${SYMBOLS:-BTC/USDT}"
+SYMBOLS="${SYMBOLS:-BTC/USDT,ETH/USDT,SOL/USDT}"
 TIMEFRAME="${TIMEFRAME:-1h}"
 TRAIN_ARGS="${TRAIN_ARGS:---inherit elite --kill-drawdown 0.35 --kill-on-loss false --target-sharpe 99 --max-generations 20}"
 
