@@ -25,6 +25,7 @@ Each coin and timeframe gets its own model in `runs/<SYMBOL>_<TIMEFRAME>/`. The 
 | `risk.py` | stop-loss, profit lock, min hold, re-entry cooldown, enforced in tests and live |
 | `news.py` | News AI: headlines → Claude → alert / pause entries / close opposing positions |
 | `report.py` | live trade stats + News AI scorecard |
+| `pumpscan.py` | pump.fun meme-coin scanner, test mode: logs picks + 1h/24h outcomes, never buys |
 | `ai4trade.py` | paper trading on [AI-Trader](https://github.com/HKUDS/AI-Trader) (ai4trade.ai) |
 
 ## Telegram trade alerts
@@ -98,6 +99,19 @@ Every `NEWS_INTERVAL_MIN` minutes (default 10), the bot reads fresh headlines fr
 News never opens trades. Every judged headline is logged to `runs/news_log.csv` with prices, and `python report.py` scores Claude's bullish/bearish calls 4h and 24h later. Let news do more only if that scorecard proves itself over 50+ calls.
 
 Enable it by setting `ANTHROPIC_API_KEY` in `.env`. Model: `NEWS_MODEL` (default `claude-opus-5-5`; `claude-haiku-5-5` costs far less). Requests use low effort and the API's automatic refusal fallback. If the news check fails, price signals keep running.
+
+## Pump.fun scanner, test mode (`pumpscan.py`)
+Every 5 minutes it looks at the 50 most recently traded pump.fun coins and keeps those with early traction:
+- 10–180 minutes old, $15k–$500k market cap, within 30% of their all-time high
+- has socials, isn't a copycat name, and the creator hasn't launched more than 2 of them
+- at least $10k of volume and 50 buys in the last hour, with more buys than sells (from DexScreener)
+
+Each pick goes to `runs/pump_picks.csv`, and its price is checked again 1h and 24h later. A coin with no market left counts as −100%. **It never buys.** Per-pick Telegram alerts stay off (`PUMP_ALERTS=off`); only a daily scorecard is sent.
+```bash
+docker compose --profile pumpscan up -d        # start the scanner next to the bot
+docker compose exec bot python pumpscan.py --report
+```
+Only consider `PUMP_ALERTS=on` if 100+ picks scored at 24h are profitable on average after ~3% fees. Expect most picks to lose: these are the riskiest assets in crypto.
 
 ## Paper trading on AI-Trader
 Each alert can also be placed as a simulated trade on [ai4trade.ai](https://ai4trade.ai) (from [HKUDS/AI-Trader](https://github.com/HKUDS/AI-Trader)): `buy`/`sell` for longs and `short`/`cover` for shorts, at the platform's live price, with $100K of paper money. The result is an independent record of how the signals perform. **Trades there are public** and other agents can copy them.

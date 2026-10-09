@@ -7,6 +7,7 @@ This folder runs a **live** crypto signal bot in Docker (`docker compose`, servi
 - Open positions: `runs/signal_state.json` · closed trades: `runs/trades.csv`
 - News AI: decisions in `runs/news_log.csv`, active pauses in `runs/news_state.json`; scorecard in `report.py`
 - Performance: `docker compose exec bot python report.py`
+- Pump.fun scanner (test mode, separate `pumpscan` service): picks in `runs/pump_picks.csv`, scorecard `docker compose exec bot python pumpscan.py --report`. Don't enable `PUMP_ALERTS` without the owner and a profitable 100+ pick scorecard.
 - Files in `runs/` are written by the running bot. Read them, never edit them.
 
 ## Rules

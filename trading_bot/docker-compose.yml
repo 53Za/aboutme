@@ -8,3 +8,15 @@ services:
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
+
+  pumpscan:                     # pump.fun meme-coin scanner, TEST MODE (logs picks, never buys)
+    build: .
+    command: ["python", "pumpscan.py"]
+    env_file: .env
+    volumes:
+      - ./runs:/app/runs
+    restart: unless-stopped
+    profiles: ["pumpscan"]      # off unless started with: docker compose --profile pumpscan up -d
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
